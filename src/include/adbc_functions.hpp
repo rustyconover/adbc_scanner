@@ -14,7 +14,7 @@ class AdbcConnectionWrapper;
 unique_ptr<FunctionData> AdbcScanTableBindWithConnection(ClientContext &context, TableFunctionBindInput &input,
                                                          shared_ptr<AdbcConnectionWrapper> connection,
                                                          vector<LogicalType> &return_types, vector<Identifier> &names,
-                                                         idx_t scan_threads = 1);
+                                                         bool allow_partition_scan = false);
 
 // Register catalog functions (adbc_info, adbc_tables)
 void RegisterAdbcCatalogFunctions(DatabaseInstance &db);

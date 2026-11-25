@@ -22,6 +22,6 @@ Full documentation, including installation, usage, the function reference, and c
 
 [Repository notes](docs/REPOSITORY_NOTES.md) · [Build and test](docs/BUILDING.md)
 
-## Experimental development
+## Partitioned table scans
 
-[Opt-in parallel ADBC partition scans](docs/partitioned-scans.md) describes the implementation candidate, conservative scope and pending validation.
+[Automatic ADBC partition scans](docs/partitioned-scans.md) describes driver capability detection, DuckDB scheduling, and serial fallback.

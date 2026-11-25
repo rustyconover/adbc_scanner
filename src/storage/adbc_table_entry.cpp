@@ -98,8 +98,11 @@ TableFunction AdbcTableEntry::GetScanFunction(ClientContext &context, unique_ptr
 	BoundTableFunction bound_function(adbc_scan_table_function_ptr);
 	TableFunctionBindInput bind_input(inputs, param_map, input_table_types, input_table_names, nullptr, nullptr,
 	                                  bound_function, empty_ref);
+	// Partition support is discovered at execution, independently of whole-query
+	// pushdown. Read-write attachments retain their existing scan behavior.
+	const bool allow_partition_scan = adbc_catalog.access_mode == AccessMode::READ_ONLY;
 	bind_data = AdbcScanTableBindWithConnection(context, bind_input, std::move(scan_connection), return_types, names,
-	                                            adbc_catalog.scan_threads);
+	                                            allow_partition_scan);
 
 	return adbc_scan_table_function;
 }

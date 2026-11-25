@@ -39,7 +39,7 @@ package to the exact DuckDB version used to build the extension.
 
 ```sh
 uv venv .runtime-tests
-uv pip install --python .runtime-tests/bin/python duckdb==1.5.5 adbc-driver-sqlite==1.12.0 pytest
+uv pip install --python .runtime-tests/bin/python duckdb==2.0.1 adbc-driver-sqlite==1.13.0 pytest
 ADBC_SCANNER_EXTENSION="$PWD/build/release/extension/adbc_scanner/adbc_scanner.duckdb_extension" \
   .runtime-tests/bin/python -m pytest test/python -q
 ```
@@ -78,6 +78,9 @@ uv pip install --python .runtime-tests/bin/python cryptography
   --output /tmp/contention.json
 ```
 
-The **ADBC Driver Tests** workflow builds on Linux, installs each driver via `dbc`, spins up PostgreSQL,
-MySQL, Flight SQL, Trino, and SQL Server service containers, and runs the full suite against all seven
-drivers on every push and pull request.
+The **ADBC Driver Tests** workflow runs the Python regressions against the built
+extension, including automatic partition selection, EOF handling, scheduler limits,
+transaction fallback, and cancellation. Its DuckDB version matches the pinned
+submodule and Python package. The workflow also installs drivers via `dbc`, starts
+PostgreSQL, MySQL, Flight SQL, Trino, and SQL Server service containers, and runs the
+SQL driver suite on pull requests and pushes to the release branches.
