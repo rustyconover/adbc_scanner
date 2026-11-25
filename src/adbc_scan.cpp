@@ -15,7 +15,6 @@
 #include "duckdb/common/insertion_order_preserving_map.hpp"
 #include "duckdb/common/vector_operations/vector_operations.hpp"
 #include "duckdb/main/client_context.hpp"
-#include "duckdb/parallel/task_scheduler.hpp"
 #include "duckdb/parallel/pipeline.hpp"
 #include "duckdb/parser/parsed_data/create_table_function_info.hpp"
 #include "duckdb/parser/keyword_helper.hpp"
@@ -96,7 +95,7 @@ struct AdbcScanBindData : public TableFunctionData {
     vector<LogicalType> param_types;
     // Batch size hint for the driver (0 = use driver default)
     idx_t batch_size = 0;
-	idx_t scan_threads = 1; // ATTACH generated table scans only
+	bool allow_partition_scan = false; // Read-only ATTACH generated table scans only
 	// For adbc_scan_table: store catalog, schema, table name and column names for projection pushdown
 	string catalog_name;  // Optional catalog (empty = default)
     string schema_name;   // Optional schema (empty = default)
@@ -160,7 +159,6 @@ struct AdbcScanGlobalState : public GlobalTableFunctionState {
     // Whether we're done reading
 	atomic<bool> done {false};
 	bool partitioned = false;
-	idx_t scan_threads = 1;
 	vector<string> partition_tokens;
 	atomic<idx_t> next_partition {0};
 	atomic<bool> early_reader_claimed {false};
@@ -213,7 +211,9 @@ struct AdbcScanGlobalState : public GlobalTableFunctionState {
     }
 
     idx_t MaxThreads() const override {
-		return partitioned ? scan_threads : 1; // Never share one stream across workers
+		// Global init has already discovered the available work. DuckDB applies
+		// its scheduler and pipeline limits before creating local readers.
+		return partitioned ? MaxValue<idx_t>(1, partition_tokens.size()) : 1;
 	}
 };
 
@@ -1000,7 +1000,9 @@ static bool GetNextPartitionBatch(ClientContext &context, AdbcScanGlobalState &g
 			auto chunk = make_uniq<ArrowArrayWrapper>();
 			auto &stream = local.partition_stream;
 			int ret = stream.get_next(&stream, &chunk->arrow_array);
-			if (ret != 0 || (!chunk->arrow_array.release && stream.get_last_error && stream.get_last_error(&stream))) {
+			// Arrow permits get_last_error only after a failed operation. A
+			// successful get_next with a released array is ordinary end-of-stream.
+			if (ret != 0) {
 				ThrowIfInterrupted(context);
 				auto msg = stream.get_last_error ? stream.get_last_error(&stream) : nullptr;
 				throw IOException("ADBC partition read failed: " + ScrubCredentials(msg ? msg : "driver error"));
@@ -1228,9 +1230,9 @@ static string BuildQualifiedTableName(const string &catalog, const string &schem
 unique_ptr<FunctionData> AdbcScanTableBindWithConnection(ClientContext &context, TableFunctionBindInput &input,
                                                          shared_ptr<AdbcConnectionWrapper> connection,
                                                          vector<LogicalType> &return_types, vector<Identifier> &names,
-                                                         idx_t scan_threads) {
+                                                         bool allow_partition_scan) {
 	auto bind_data = make_uniq<AdbcScanBindData>();
-	bind_data->scan_threads = scan_threads;
+	bind_data->allow_partition_scan = allow_partition_scan;
 
 	// Check for NULL database name first
     if (input.inputs[0].IsNull()) {
@@ -1301,14 +1303,13 @@ static unique_ptr<FunctionData> AdbcScanTableBind(ClientContext &context, TableF
         throw InvalidInputException("adbc_scan_table: Table name cannot be NULL");
     }
     auto connection = GetAttachedConnection(context, input.inputs[0], "adbc_scan_table", false);
-	auto result = AdbcScanTableBindWithConnection(context, input, std::move(connection), return_types, names, 1);
+	auto result = AdbcScanTableBindWithConnection(context, input, std::move(connection), return_types, names, false);
 	result->Cast<AdbcScanBindData>().resolve_at_runtime = true;
     return result;
 }
 
 // Global init for adbc_scan_table - builds projected query based on column_ids and filters
-static bool TryExecuteTablePartitions(ClientContext &context, AdbcScanGlobalState &state, idx_t requested,
-                                      int64_t &rows_affected) {
+static bool TryExecuteTablePartitions(AdbcScanGlobalState &state, int64_t &rows_affected) {
 	AdbcPartitionDescriptors descriptors;
 	memset(&state.projected_schema.arrow_schema, 0, sizeof(state.projected_schema.arrow_schema));
 	if (!state.statement->ExecutePartitions(&state.projected_schema.arrow_schema, &descriptors.value, &rows_affected)) {
@@ -1336,9 +1337,6 @@ static bool TryExecuteTablePartitions(ClientContext &context, AdbcScanGlobalStat
 	state.partition_lifetime = make_shared_ptr<AdbcPartitionLifetime>();
 	state.partition_lifetime->producer = state.statement;
 	state.partitioned = true;
-	auto scheduler_threads = MaxValue<idx_t>(1, TaskScheduler::GetScheduler(context).NumberOfThreads());
-	state.scan_threads = MaxValue<idx_t>(
-	    1, MinValue<idx_t>(requested, MinValue<idx_t>(scheduler_threads, state.partition_tokens.size())));
 	state.done = state.partition_tokens.empty();
 	return true;
 }
@@ -1347,9 +1345,9 @@ static unique_ptr<GlobalTableFunctionState> AdbcScanTableInitGlobal(ClientContex
     auto &bind_data = input.bind_data->Cast<AdbcScanBindData>();
     auto global_state = make_uniq<AdbcScanGlobalState>();
 
-	if (bind_data.scan_threads > 1 && !context.transaction.IsAutoCommit()) {
-		throw InvalidInputException("Parallel ADBC partition scans require autocommit");
-	}
+	// Check at execution time: a prepared scan can be executed both inside and
+	// outside an explicit transaction. Keep the existing connection in a transaction.
+	const bool try_partitions = bind_data.allow_partition_scan && context.transaction.IsAutoCommit();
 	auto connection = ScanConnection(context, bind_data, "adbc_scan_table");
 
     // Build the query with projection pushdown
@@ -1458,8 +1456,7 @@ static unique_ptr<GlobalTableFunctionState> AdbcScanTableInitGlobal(ClientContex
     int64_t rows_affected = -1;
     global_state->WatchForInterrupt(context);
     try {
-		if (bind_data.scan_threads <= 1 ||
-		    !TryExecuteTablePartitions(context, *global_state, bind_data.scan_threads, rows_affected)) {
+		if (!try_partitions || !TryExecuteTablePartitions(*global_state, rows_affected)) {
 			global_state->statement->ExecuteQuery(&global_state->stream, &rows_affected);
 			global_state->stream_initialized = true;
 		}

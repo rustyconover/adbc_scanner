@@ -77,6 +77,8 @@ jobs:
           --health-start-period 30s
 
     env:
+      # Match the pinned DuckDB submodule and the Python regression runtime.
+      DUCKDB_VERSION: v2.0.1
       # Pin vcpkg to the commit this DuckDB version is built against (matches
       # extension-ci-tools' _extension_distribution.yml default) and use DuckDB's
       # public read-only binary cache so dependencies don't build from source.
@@ -108,6 +110,21 @@ jobs:
           VCPKG_TOOLCHAIN_PATH: ${{ github.workspace }}/vcpkg/scripts/buildsystems/vcpkg.cmake
           VCPKG_OVERLAY_PORTS: ${{ github.workspace }}/extension-ci-tools/vcpkg_ports
 
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install Python regression dependencies
+        run: |
+          python -m venv .runtime-tests
+          .runtime-tests/bin/python -m pip install "duckdb==${DUCKDB_VERSION#v}" adbc-driver-sqlite==1.13.0 pytest
+
+      - name: Run Python regression suite
+        timeout-minutes: 5
+        env:
+          ADBC_SCANNER_EXTENSION: ${{ github.workspace }}/build/release/extension/adbc_scanner/adbc_scanner.duckdb_extension
+        run: .runtime-tests/bin/python -m pytest test/python -q
+
       - name: Install dbc and ADBC drivers
         run: |
           curl -LsSf https://dbc.columnar.tech/install.sh | sh
@@ -123,7 +140,7 @@ jobs:
 
       - name: Wait for Flight SQL server
         run: |
-          for i in $(seq 1 30); do
+          for _ in $(seq 1 30); do
             if (echo > /dev/tcp/localhost/31337) >/dev/null 2>&1; then
               echo "Flight SQL server is accepting connections"; exit 0
             fi
@@ -133,7 +150,7 @@ jobs:
 
       - name: Wait for Trino server
         run: |
-          for i in $(seq 1 60); do
+          for _ in $(seq 1 60); do
             if curl -s http://localhost:18080/v1/info | grep -q '"starting":false'; then
               echo "Trino is ready"; exit 0
             fi

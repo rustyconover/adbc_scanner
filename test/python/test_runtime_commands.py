@@ -161,6 +161,18 @@ def count(observer):
     return observer.execute("SELECT value FROM counters WHERE id = 1").fetchone()[0]
 
 
+def test_read_only_table_scan_falls_back_for_sqlite(database):
+    db, _, _, path = database
+    db.execute(
+        f"ATTACH {quote(path)} AS readonly "
+        f"(TYPE adbc, driver {quote(adbc_driver_sqlite._driver_path())}, "
+        "READ_ONLY, query_pushdown false)"
+    )
+    # This generated scan attempts partitions automatically; SQLite does not
+    # implement them, so the same SELECT must still succeed through ExecuteQuery.
+    assert db.execute("SELECT id, value FROM readonly.counters").fetchall() == [(1, 0)]
+
+
 def test_explain_and_prepare_do_not_execute(database):
     db, handle, observer, _ = database
     command = f"adbc_execute({handle}, 'UPDATE counters SET value = value + 1')"

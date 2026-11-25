@@ -10,7 +10,7 @@
 #include <string.h>
 #include <time.h>
 
-static _Atomic int counts[16];
+static _Atomic int counts[17];
 static char last_sql[4096];
 struct DB {
     char mode[32];
@@ -227,6 +227,11 @@ static int get_next(struct ArrowArrayStream *out, struct ArrowArray *a) {
 }
 static const char *get_error(struct ArrowArrayStream *s) {
     struct Stream *st = s->private_data;
+    counts[16]++;
+    // Arrow callers may only request this after a failed operation. Drivers
+    // need not return NULL when the last operation succeeded, including EOF.
+    if (st->conn && !strcmp(st->conn->db->mode, "empty_error"))
+        return st->error;
     return st->error[0] ? st->error : NULL;
 }
 static void stream_release(struct ArrowArrayStream *s) {
@@ -378,7 +383,7 @@ static AdbcStatusCode execute_parts(struct AdbcStatement *s, struct ArrowSchema 
         p->release = empty_parts_release;
         return ADBC_STATUS_OK;
     }
-    size_t n = !strcmp(mode, "empty") ? 0 : 4;
+    size_t n = !strcmp(mode, "empty") ? 0 : (!strcmp(mode, "single") ? 1 : 4);
     struct Tokens *t = calloc(1, sizeof(*t));
     t->data = calloc(n ? n : 1, sizeof(uint8_t *));
     t->lengths = calloc(n ? n : 1, sizeof(size_t));
